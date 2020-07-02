@@ -21,7 +21,7 @@ import org.junit.Test;
 
 import org.apache.geode.distributed.internal.InternalLocator;
 import org.apache.geode.internal.AvailablePort;
-import org.apache.geode.internal.cache.wan.parallel.ParallelGatewaySenderQueue;
+import org.apache.geode.internal.cache.wan.BatchRemovalThreadHelper;
 import org.apache.geode.test.dunit.DistributedTestUtils;
 import org.apache.geode.test.dunit.Host;
 import org.apache.geode.test.dunit.IgnoredException;
@@ -61,14 +61,14 @@ public class WANRollingUpgradeVerifyGatewaySenderProfile extends WANRollingUpgra
       // Create GatewaySender in old server
       String senderId = getName() + "_gatewaysender";
       oldServer.invoke(() -> createGatewaySender(senderId, 10,
-          ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL));
+          BatchRemovalThreadHelper.getDefaultMessageSyncInterval()));
 
       // Start current server
       currentServer.invoke(() -> createCache(locators));
 
       // Attempt to create GatewaySender in new server
       currentServer.invoke(() -> createGatewaySender(senderId, 10,
-          ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL));
+          BatchRemovalThreadHelper.getDefaultMessageSyncInterval()));
     } finally {
       ie.remove();
     }

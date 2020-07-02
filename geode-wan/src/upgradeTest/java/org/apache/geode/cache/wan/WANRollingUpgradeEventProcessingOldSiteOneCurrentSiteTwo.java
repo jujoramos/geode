@@ -21,7 +21,7 @@ import org.junit.Test;
 
 import org.apache.geode.distributed.internal.InternalLocator;
 import org.apache.geode.internal.AvailablePort;
-import org.apache.geode.internal.cache.wan.parallel.ParallelGatewaySenderQueue;
+import org.apache.geode.internal.cache.wan.BatchRemovalThreadHelper;
 import org.apache.geode.test.dunit.DistributedTestUtils;
 import org.apache.geode.test.dunit.Host;
 import org.apache.geode.test.dunit.NetworkUtils;
@@ -80,12 +80,12 @@ public class WANRollingUpgradeEventProcessingOldSiteOneCurrentSiteTwo
     String regionName = getName() + "_region";
     String site1SenderId = getName() + "_gatewaysender_" + site2DistributedSystemId;
     startAndConfigureServers(site1Server1, site1Server2, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     // Start and configure current site servers
     String site2SenderId = getName() + "_gatewaysender_" + site1DistributedSystemId;
     startAndConfigureServers(site2Server1, site2Server2, site2Locators, site1DistributedSystemId,
-        regionName, site2SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site2SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     // Do puts from old site client and verify events on current site
     int numPuts = 100;

@@ -12,11 +12,23 @@
  * or implied. See the License for the specific language governing permissions and limitations under
  * the License.
  */
-package org.apache.geode.internal.cache.wan.parallel;
+package org.apache.geode.internal.cache.wan;
 
+/**
+ * Helper Test class to access package protected fields in AbstractBatchRemovalThread.
+ */
 public class BatchRemovalThreadHelper {
 
+  public static int getDefaultMessageSyncInterval() {
+    return AbstractBatchRemovalThread.DEFAULT_MESSAGE_SYNC_INTERVAL;
+  }
+
   public static void setMessageSyncInterval(int intervalMs) {
-    ParallelGatewaySenderQueue.messageSyncInterval = intervalMs;
+    AbstractBatchRemovalThread.messageSyncInterval = intervalMs;
+  }
+
+  public static void resetMessageSyncInterval() {
+    AbstractBatchRemovalThread.messageSyncInterval =
+        AbstractBatchRemovalThread.DEFAULT_MESSAGE_SYNC_INTERVAL;
   }
 }

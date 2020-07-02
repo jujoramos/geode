@@ -24,7 +24,7 @@ import org.junit.Test;
 import org.apache.geode.cache.Region;
 import org.apache.geode.distributed.internal.InternalLocator;
 import org.apache.geode.internal.AvailablePortHelper;
-import org.apache.geode.internal.cache.wan.parallel.ParallelGatewaySenderQueue;
+import org.apache.geode.internal.cache.wan.BatchRemovalThreadHelper;
 import org.apache.geode.test.dunit.DistributedTestUtils;
 import org.apache.geode.test.dunit.Host;
 import org.apache.geode.test.dunit.IgnoredException;
@@ -106,7 +106,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
     regionName = getName() + "_region";
     site1SenderId = getName() + "_gatewaysender_" + site2DistributedSystemId;
     startAndConfigureServers(site1Server1, site1Server2, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     site2SenderId = getName() + "_gatewaysender_" + site1DistributedSystemId;
 
@@ -141,7 +141,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Roll mixed site servers to current
     rollStartAndConfigureServerToCurrent(site1Server1, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
     site1Server1.invoke(() -> pauseSender(site1SenderId));
 
     // double check queue size should be numPuts
@@ -150,7 +150,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Start and configure old site servers
     startAndConfigureServers(site2Server1, site2Server2, site2Locators, site1DistributedSystemId,
-        regionName, site2SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site2SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     // stop one of the sender to force all the old events are processed by the new sender
     site1Server2.invoke(() -> closeCache());
@@ -191,14 +191,14 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Roll mixed site servers to current
     rollStartAndConfigureServerToCurrent(site1Server1, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
     site1Server1.invoke(() -> pauseSender(site1SenderId));
 
     // wait until site1Server finished rolling
     site1Server1.invoke(() -> waitForQueueRegionToCertainSize(site1SenderId, numPuts, false));
 
     rollStartAndConfigureServerToCurrent(site1Server2, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
     site1Server2.invoke(() -> pauseSender(site1SenderId));
 
     // double check queue size should be numPuts
@@ -207,7 +207,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Start and configure old site servers
     startAndConfigureServers(site2Server1, site2Server2, site2Locators, site1DistributedSystemId,
-        regionName, site2SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site2SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     // resume the senders at mixed site
     site1Server1.invoke(() -> resumeSender(site1SenderId));
@@ -250,7 +250,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Roll one mixed site server to current
     rollStartAndConfigureServerToCurrent(site1Server1, site1Locators, site2DistributedSystemId,
-        regionName, site1SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site1SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
     site1Server1.invoke(() -> pauseSender(site1SenderId));
 
     // double check queue size should be numPuts
@@ -272,7 +272,7 @@ public class WANRollingUpgradeNewSenderProcessOldEvent
 
     // Start and configure old site servers
     startAndConfigureServers(site2Server1, site2Server2, site2Locators, site1DistributedSystemId,
-        regionName, site2SenderId, ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+        regionName, site2SenderId, BatchRemovalThreadHelper.getDefaultMessageSyncInterval());
 
     // stop the new sender to force all the old+new events are processed by the remained old sender
     site1Server1.invoke(() -> closeCache());

@@ -33,9 +33,6 @@ import java.util.function.Predicate;
 
 import org.apache.logging.log4j.Logger;
 
-import org.apache.geode.CancelException;
-import org.apache.geode.SystemFailure;
-import org.apache.geode.annotations.Immutable;
 import org.apache.geode.annotations.VisibleForTesting;
 import org.apache.geode.cache.AttributesMutator;
 import org.apache.geode.cache.Cache;
@@ -55,7 +52,6 @@ import org.apache.geode.cache.TimeoutException;
 import org.apache.geode.cache.TransactionId;
 import org.apache.geode.cache.asyncqueue.AsyncEvent;
 import org.apache.geode.cache.asyncqueue.internal.AsyncEventQueueImpl;
-import org.apache.geode.distributed.internal.InternalDistributedSystem;
 import org.apache.geode.internal.cache.CachedDeserializable;
 import org.apache.geode.internal.cache.Conflatable;
 import org.apache.geode.internal.cache.DistributedRegion;
@@ -70,6 +66,7 @@ import org.apache.geode.internal.cache.event.EventTracker;
 import org.apache.geode.internal.cache.event.NonDistributedEventTracker;
 import org.apache.geode.internal.cache.versions.RegionVersionVector;
 import org.apache.geode.internal.cache.versions.VersionSource;
+import org.apache.geode.internal.cache.wan.AbstractBatchRemovalThread;
 import org.apache.geode.internal.cache.wan.AbstractGatewaySender;
 import org.apache.geode.internal.cache.wan.GatewaySenderEventImpl;
 import org.apache.geode.internal.cache.wan.GatewaySenderStats;
@@ -189,14 +186,9 @@ public class SerialGatewaySenderQueue implements RegionQueue {
 
   private volatile long lastDestroyedKey = -1;
 
-  public static final int DEFAULT_MESSAGE_SYNC_INTERVAL = 1;
+  private BatchRemovalThread removalThread;
 
-  @Immutable
-  private static final int messageSyncInterval = DEFAULT_MESSAGE_SYNC_INTERVAL;
-
-  private BatchRemovalThread removalThread = null;
-
-  private AbstractGatewaySender sender = null;
+  private AbstractGatewaySender sender;
 
   private MetaRegionFactory metaRegionFactory;
 
@@ -214,7 +206,7 @@ public class SerialGatewaySenderQueue implements RegionQueue {
     this.metaRegionFactory = metaRegionFactory;
     this.headKey = -1;
     this.tailKey.set(-1);
-    this.indexes = new HashMap<String, Map<Object, Long>>();
+    this.indexes = new HashMap<>();
     this.enableConflation = abstractSender.isBatchConflationEnabled();
     this.diskStoreName = abstractSender.getDiskStoreName();
     this.batchSize = abstractSender.getBatchSize();
@@ -227,9 +219,10 @@ public class SerialGatewaySenderQueue implements RegionQueue {
     this.maximumQueueMemory = abstractSender.getMaximumMemeoryPerDispatcherQueue();
     this.stats = abstractSender.getStatistics();
     initializeRegion(abstractSender, listener);
+
     // Increment queue size. Fix for bug 51988.
     this.stats.incQueueSize(this.region.size());
-    this.removalThread = new BatchRemovalThread(abstractSender.getCache());
+    this.removalThread = new BatchRemovalThread(logger, abstractSender.getCache());
     this.removalThread.start();
     this.sender = abstractSender;
     if (logger.isDebugEnabled()) {
@@ -1128,153 +1121,57 @@ public class SerialGatewaySenderQueue implements RegionQueue {
     removeCacheListener();
   }
 
-  private class BatchRemovalThread extends Thread {
-    /**
-     * boolean to make a shutdown request
-     */
-    private volatile boolean shutdown = false;
+  /**
+   * BatchRemovalThread for SerialGatewaySenderQueues.
+   */
+  private class BatchRemovalThread extends AbstractBatchRemovalThread {
 
-    private final InternalCache cache;
-
-    /**
-     * Constructor : Creates and initializes the thread
-     *
-     */
-    public BatchRemovalThread(InternalCache c) {
-      this.setDaemon(true);
-      this.cache = c;
-    }
-
-    private boolean checkCancelled() {
-      if (shutdown) {
-        return true;
-      }
-      if (cache.getCancelCriterion().isCancelInProgress()) {
-        return true;
-      }
-      return false;
+    public BatchRemovalThread(Logger logger, InternalCache internalCache) {
+      super("", logger, internalCache);
     }
 
     @Override
-    public void run() {
-      InternalDistributedSystem ids = cache.getInternalDistributedSystem();
-
-      try { // ensure exit message is printed
-        // Long waitTime = Long.getLong(QUEUE_REMOVAL_WAIT_TIME, 1000);
-        for (;;) {
-          try { // be somewhat tolerant of failures
-            if (checkCancelled()) {
-              break;
-            }
-
-            // TODO : make the thread running time configurable
-            boolean interrupted = Thread.interrupted();
-            try {
-              synchronized (this) {
-                this.wait(messageSyncInterval * 1000L);
-              }
-            } catch (InterruptedException e) {
-              interrupted = true;
-              if (checkCancelled()) {
-                break;
-              }
-
-              break; // desperation...we must be trying to shut down...?
-            } finally {
-              // Not particularly important since we're exiting the thread,
-              // but following the pattern is still good practice...
-              if (interrupted)
-                Thread.currentThread().interrupt();
-            }
-
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread about to send the last Dispatched key {}",
-                  lastDispatchedKey);
-            }
-
-            long temp;
-            lock.writeLock().lock();
-            try {
-              temp = lastDispatchedKey;
-              boolean wasEmpty = temp == lastDestroyedKey;
-              while (lastDispatchedKey == lastDestroyedKey) {
-                SerialGatewaySenderQueue.this.wait();
-                temp = lastDispatchedKey;
-              }
-              if (wasEmpty)
-                continue;
-            } finally {
-              lock.writeLock().unlock();
-            }
-            // release not needed since disallowOffHeapValues called
-            EntryEventImpl event = EntryEventImpl.create((LocalRegion) region, Operation.DESTROY,
-                (lastDestroyedKey + 1), null/* newValue */, null, false, cache.getMyId());
-            event.disallowOffHeapValues();
-            event.setTailKey(temp);
-
-            BatchDestroyOperation op = new BatchDestroyOperation(event);
-            op.distribute();
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread completed destroy of keys from {} to {}",
-                  lastDestroyedKey, temp);
-            }
-            lastDestroyedKey = temp;
-
-          } // be somewhat tolerant of failures
-          catch (CancelException e) {
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread is exiting due to cancellation");
-            }
-            break;
-          } catch (VirtualMachineError err) {
-            SystemFailure.initiateFailure(err);
-            // If this ever returns, rethrow the error. We're poisoned
-            // now, so don't let this thread continue.
-            throw err;
-          } catch (Throwable t) {
-            // Whenever you catch Error or Throwable, you must also
-            // catch VirtualMachineError (see above). However, there is
-            // _still_ a possibility that you are dealing with a cascading
-            // error condition, so you also need to check to see if the JVM
-            // is still usable:
-            SystemFailure.checkFailure();
-            if (checkCancelled()) {
-              break;
-            }
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread: ignoring exception", t);
-            }
-          }
-        } // for
-      } // ensure exit message is printed
-      catch (CancelException e) {
-        if (logger.isDebugEnabled()) {
-          logger.debug("BatchRemovalThread exiting due to cancellation: " + e);
-        }
-      } finally {
-        logger.info("The QueueRemovalThread is done.");
+    public void distributeIfNeeded() throws InterruptedException {
+      boolean debugEnabled = logger.isDebugEnabled();
+      if (debugEnabled) {
+        logger.debug("BatchRemovalThread about to send the last Dispatched key {}",
+            lastDispatchedKey);
       }
-    }
 
-    /**
-     * shutdown this thread and the caller thread will join this thread
-     */
-    public void shutdown() {
-      this.shutdown = true;
-      this.interrupt();
-      boolean interrupted = Thread.interrupted();
+      long temp;
+      lock.writeLock().lock();
+
       try {
-        this.join(15 * 1000);
-      } catch (InterruptedException e) {
-        interrupted = true;
-      } finally {
-        if (interrupted) {
-          Thread.currentThread().interrupt();
+        temp = lastDispatchedKey;
+        boolean wasEmpty = temp == lastDestroyedKey;
+
+        while (lastDispatchedKey == lastDestroyedKey) {
+          SerialGatewaySenderQueue.this.wait();
+          temp = lastDispatchedKey;
         }
+
+        if (wasEmpty) {
+          return;
+        }
+      } finally {
+        lock.writeLock().unlock();
       }
-      if (this.isAlive()) {
-        logger.warn("QueueRemovalThread ignored cancellation");
+
+      // Release not needed since disallowOffHeapValues called
+      EntryEventImpl event = EntryEventImpl.create((LocalRegion) region, Operation.DESTROY,
+          (lastDestroyedKey + 1), null/* newValue */, null, false, cache.getMyId());
+      event.disallowOffHeapValues();
+      event.setTailKey(temp);
+
+      BatchDestroyOperation op = new BatchDestroyOperation(event);
+      op.distribute();
+
+      if (debugEnabled) {
+        logger.debug("BatchRemovalThread completed destroy of keys from {} to {}", lastDestroyedKey,
+            temp);
       }
+
+      lastDestroyedKey = temp;
     }
   }
 

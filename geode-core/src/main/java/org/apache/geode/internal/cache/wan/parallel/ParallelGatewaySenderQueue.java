@@ -40,10 +40,7 @@ import java.util.function.Predicate;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import org.apache.logging.log4j.Logger;
 
-import org.apache.geode.CancelException;
-import org.apache.geode.SystemFailure;
 import org.apache.geode.annotations.VisibleForTesting;
-import org.apache.geode.annotations.internal.MutableForTesting;
 import org.apache.geode.cache.AttributesMutator;
 import org.apache.geode.cache.Cache;
 import org.apache.geode.cache.CacheException;
@@ -82,6 +79,7 @@ import org.apache.geode.internal.cache.PartitionedRegionHelper;
 import org.apache.geode.internal.cache.PrimaryBucketException;
 import org.apache.geode.internal.cache.RegionQueue;
 import org.apache.geode.internal.cache.partitioned.colocation.ColocationLoggerFactory;
+import org.apache.geode.internal.cache.wan.AbstractBatchRemovalThread;
 import org.apache.geode.internal.cache.wan.AbstractGatewaySender;
 import org.apache.geode.internal.cache.wan.AsyncEventQueueConfigurationException;
 import org.apache.geode.internal.cache.wan.GatewaySenderConfigurationException;
@@ -106,7 +104,7 @@ public class ParallelGatewaySenderQueue implements RegionQueue {
       SEPARATOR + PartitionedRegionHelper.PR_ROOT_REGION_NAME + SEPARATOR;
 
   // <PartitionedRegion, Map<Integer, List<Object>>>
-  private final Map regionToDispatchedKeysMap = new ConcurrentHashMap();
+  private final Map regionToDispatchedKeysMap = new ConcurrentHashMap<>();
 
   protected final StoppableReentrantLock buckToDispatchLock;
   private final StoppableCondition regionToDispatchedKeysMapEmpty;
@@ -141,16 +139,6 @@ public class ParallelGatewaySenderQueue implements RegionQueue {
    */
   private final ConcurrentMap<Integer, BlockingQueue<GatewaySenderEventImpl>> bucketToTempQueueMap =
       new ConcurrentHashMap<Integer, BlockingQueue<GatewaySenderEventImpl>>();
-
-  /**
-   * The default frequency (in milliseconds) at which a message will be sent by the primary to all
-   * the secondary nodes to remove the events which have already been dispatched from the queue.
-   */
-  public static final int DEFAULT_MESSAGE_SYNC_INTERVAL = 10;
-
-  // TODO:REF: how to change the message sync interval ? should it be common for serial and parallel
-  @MutableForTesting
-  protected static volatile int messageSyncInterval = DEFAULT_MESSAGE_SYNC_INTERVAL;
 
   // TODO:REF: name change for thread, as it appears in the log
   private BatchRemovalThread removalThread = null;
@@ -313,7 +301,7 @@ public class ParallelGatewaySenderQueue implements RegionQueue {
     // still, it is safer approach to synchronize it
     synchronized (ParallelGatewaySenderQueue.class) {
       if (removalThread == null) {
-        removalThread = new BatchRemovalThread(this.sender.getCache(), this);
+        removalThread = new BatchRemovalThread(logger, this.sender.getCache(), this);
         removalThread.start();
       }
     }
@@ -1755,174 +1743,72 @@ public class ParallelGatewaySenderQueue implements RegionQueue {
     return regionName.substring(1, queueStringStart);
   }
 
-  // TODO:REF: Name for this class should be appropriate?
-  private class BatchRemovalThread extends Thread {
-    /**
-     * boolean to make a shutdown request
-     */
-    private volatile boolean shutdown = false;
+  /**
+   * BatchRemovalThread for ParallelGatewaySenderQueues.
+   */
+  private class BatchRemovalThread extends AbstractBatchRemovalThread {
 
-    private final InternalCache cache;
-
-    /**
-     * Constructor : Creates and initializes the thread
-     */
-    public BatchRemovalThread(InternalCache c, ParallelGatewaySenderQueue queue) {
-      super("BatchRemovalThread for GatewaySender_" + queue.sender.getId() + "_" + queue.index);
-      this.setDaemon(true);
-      this.cache = c;
-    }
-
-    private boolean checkCancelled() {
-      if (shutdown) {
-        return true;
-      }
-      if (cache.getCancelCriterion().isCancelInProgress()) {
-        return true;
-      }
-      return false;
-    }
-
-    @Override
-    public void run() {
-      try {
-        InternalDistributedSystem ids = cache.getInternalDistributedSystem();
-        DistributionManager dm = ids.getDistributionManager();
-        for (;;) {
-          try { // be somewhat tolerant of failures
-            if (checkCancelled()) {
-              break;
-            }
-
-            // TODO : make the thread running time configurable
-            boolean interrupted = Thread.interrupted();
-            try {
-              synchronized (this) {
-                this.wait(messageSyncInterval);
-              }
-            } catch (InterruptedException e) {
-              interrupted = true;
-              if (checkCancelled()) {
-                break;
-              }
-              break; // desperation...we must be trying to shut
-              // down...?
-            } finally {
-              // Not particularly important since we're exiting
-              // the thread,
-              // but following the pattern is still good
-              // practice...
-              if (interrupted)
-                Thread.currentThread().interrupt();
-            }
-
-            if (logger.isDebugEnabled()) {
-              buckToDispatchLock.lock();
-              try {
-                logger.debug("BatchRemovalThread about to query the batch removal map {}",
-                    regionToDispatchedKeysMap);
-              } finally {
-                buckToDispatchLock.unlock();
-              }
-            }
-
-            final HashMap<String, Map<Integer, List>> temp;
-            buckToDispatchLock.lock();
-            try {
-              boolean wasEmpty = regionToDispatchedKeysMap.isEmpty();
-              while (regionToDispatchedKeysMap.isEmpty()) {
-                regionToDispatchedKeysMapEmpty.await(StoppableCondition.TIME_TO_WAIT);
-              }
-              if (wasEmpty)
-                continue;
-              // TODO: This should be optimized.
-              temp = new HashMap<String, Map<Integer, List>>(regionToDispatchedKeysMap);
-              regionToDispatchedKeysMap.clear();
-            } finally {
-              buckToDispatchLock.unlock();
-            }
-            // Get all the data-stores wherever userPRs are present
-            Set<InternalDistributedMember> recipients = getAllRecipients(cache, temp);
-            if (!recipients.isEmpty()) {
-              ParallelQueueRemovalMessage pqrm = new ParallelQueueRemovalMessage(temp);
-              pqrm.setRecipients(recipients);
-              dm.putOutgoing(pqrm);
-            } else {
-              regionToDispatchedKeysMap.putAll(temp);
-            }
-
-          } // be somewhat tolerant of failures
-          catch (CancelException e) {
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread is exiting due to cancellation");
-            }
-            break;
-          } catch (VirtualMachineError err) {
-            SystemFailure.initiateFailure(err);
-            // If this ever returns, rethrow the error. We're poisoned
-            // now, so don't let this thread continue.
-            throw err;
-          } catch (Throwable t) {
-            Error err;
-            if (t instanceof Error && SystemFailure.isJVMFailureError(err = (Error) t)) {
-              SystemFailure.initiateFailure(err);
-              // If this ever returns, rethrow the error. We're
-              // poisoned now, so don't let this thread continue.
-              throw err;
-            }
-            // Whenever you catch Error or Throwable, you must also
-            // check for fatal JVM error (see above). However, there
-            // is _still_ a possibility that you are dealing with a
-            // cascading error condition, so you also need to check to see if
-            // the JVM is still usable:
-            SystemFailure.checkFailure();
-            if (checkCancelled()) {
-              break;
-            }
-            if (logger.isDebugEnabled()) {
-              logger.debug("BatchRemovalThread: ignoring exception", t);
-            }
-          }
-        } // for
-      } // ensure exit message is printed
-      catch (CancelException e) {
-        if (logger.isDebugEnabled()) {
-          logger.debug("BatchRemovalThread exiting due to cancellation: " + e);
-        }
-      } finally {
-        logger.info("The QueueRemovalThread is done.");
-      }
+    public BatchRemovalThread(Logger logger, InternalCache internalCache,
+        ParallelGatewaySenderQueue queue) {
+      super("BatchRemovalThread for GatewaySender_" + queue.sender.getId() + "_" + queue.index,
+          logger, internalCache);
     }
 
     private Set<InternalDistributedMember> getAllRecipients(InternalCache cache, Map map) {
-      Set recipients = new ObjectOpenHashSet();
+      Set<InternalDistributedMember> recipients = new ObjectOpenHashSet<>();
       for (Object pr : map.keySet()) {
         PartitionedRegion partitionedRegion = (PartitionedRegion) cache.getRegion((String) pr);
         if (partitionedRegion != null && partitionedRegion.getRegionAdvisor() != null) {
           recipients.addAll(partitionedRegion.getRegionAdvisor().adviseDataStore());
         }
       }
+
       return recipients;
     }
 
-    /**
-     * shutdown this thread and the caller thread will join this thread
-     */
-    public void shutdown() {
-      this.shutdown = true;
-      this.interrupt();
-      boolean interrupted = Thread.interrupted();
-      try {
-        this.join(15 * 1000);
-      } catch (InterruptedException e) {
-        interrupted = true;
-      } finally {
-        if (interrupted) {
-          Thread.currentThread().interrupt();
+    @Override
+    public void distributeIfNeeded() throws InterruptedException {
+      InternalDistributedSystem ids = cache.getInternalDistributedSystem();
+      DistributionManager distributionManager = ids.getDistributionManager();
+
+      if (logger.isDebugEnabled()) {
+        buckToDispatchLock.lock();
+        try {
+          logger.debug("BatchRemovalThread about to query the batch removal map {}",
+              regionToDispatchedKeysMap);
+        } finally {
+          buckToDispatchLock.unlock();
         }
       }
-      if (this.isAlive()) {
-        logger.warn("QueueRemovalThread ignored cancellation");
+
+      final HashMap<String, Map<Integer, List>> temp;
+      buckToDispatchLock.lock();
+
+      try {
+        boolean wasEmpty = regionToDispatchedKeysMap.isEmpty();
+        while (regionToDispatchedKeysMap.isEmpty()) {
+          regionToDispatchedKeysMapEmpty.await(StoppableCondition.TIME_TO_WAIT);
+        }
+
+        if (wasEmpty) {
+          return;
+        }
+
+        // TODO: This should be optimized.
+        temp = new HashMap<String, Map<Integer, List>>(regionToDispatchedKeysMap);
+        regionToDispatchedKeysMap.clear();
+      } finally {
+        buckToDispatchLock.unlock();
+      }
+
+      // Get all the data-stores wherever userPRs are present
+      Set<InternalDistributedMember> recipients = getAllRecipients(cache, temp);
+      if (!recipients.isEmpty()) {
+        ParallelQueueRemovalMessage pqrm = new ParallelQueueRemovalMessage(temp);
+        pqrm.setRecipients(recipients);
+        distributionManager.putOutgoing(pqrm);
+      } else {
+        regionToDispatchedKeysMap.putAll(temp);
       }
     }
   }

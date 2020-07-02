@@ -54,9 +54,8 @@ import org.apache.geode.distributed.internal.InternalLocator;
 import org.apache.geode.internal.AvailablePortHelper;
 import org.apache.geode.internal.cache.ForceReattemptException;
 import org.apache.geode.internal.cache.wan.AbstractGatewaySender;
-import org.apache.geode.internal.cache.wan.parallel.BatchRemovalThreadHelper;
+import org.apache.geode.internal.cache.wan.BatchRemovalThreadHelper;
 import org.apache.geode.internal.cache.wan.parallel.ConcurrentParallelGatewaySenderQueue;
-import org.apache.geode.internal.cache.wan.parallel.ParallelGatewaySenderQueue;
 import org.apache.geode.management.internal.cli.util.CommandStringBuilder;
 import org.apache.geode.management.internal.i18n.CliStrings;
 import org.apache.geode.test.dunit.Host;
@@ -285,15 +284,10 @@ public abstract class WANRollingUpgradeDUnitTest extends JUnit4CacheTestCase {
 
   void resetAllMessageSyncIntervals(VM site1Server1, VM site1Server2, VM site2Server1,
       VM site2Server2) {
-    site1Server1.invoke(() -> resetMessageSyncInterval());
-    site1Server2.invoke(() -> resetMessageSyncInterval());
-    site2Server1.invoke(() -> resetMessageSyncInterval());
-    site2Server2.invoke(() -> resetMessageSyncInterval());
-  }
-
-  private void resetMessageSyncInterval() {
-    BatchRemovalThreadHelper
-        .setMessageSyncInterval(ParallelGatewaySenderQueue.DEFAULT_MESSAGE_SYNC_INTERVAL);
+    site1Server1.invoke(BatchRemovalThreadHelper::resetMessageSyncInterval);
+    site1Server2.invoke(BatchRemovalThreadHelper::resetMessageSyncInterval);
+    site2Server1.invoke(BatchRemovalThreadHelper::resetMessageSyncInterval);
+    site2Server2.invoke(BatchRemovalThreadHelper::resetMessageSyncInterval);
   }
 
   void createGatewayReceiver() {
